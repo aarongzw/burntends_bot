@@ -20,28 +20,30 @@ TIMESLOTS_LUNCH = ["12:00", "12:15", "12:30", "12:45", "13:00"]
 TIMESLOTS_DINNER = ["18:00", "18:15", "18:30", "18:45", "19:00", "19:15", "19:30"]
 
 def get_target_dates():
-    # All dates from today onwards for the rest of 2026
-    target_months = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-    dates = []
-    for month in target_months:
+    # Returns two lists — Fridays and Saturdays separately
+    fridays = []
+    saturdays = []
+    for month in range(3, 13):
         start = date(2026, month, 1)
         end = date(2027, 1, 1) if month == 12 else date(2026, month + 1, 1)
         current = start
         while current < end:
             if current > date.today():
-                dates.append(current.strftime("%Y-%m-%d"))
+                if current.weekday() == 4:  # Friday
+                    fridays.append(current.strftime("%Y-%m-%d"))
+                elif current.weekday() == 5:  # Saturday
+                    saturdays.append(current.strftime("%Y-%m-%d"))
             current += timedelta(days=1)
-    return dates
+    return fridays, saturdays
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message})
 
-def check_availability(mealtype, timeslots):
-    target_dates = get_target_dates()
+def check_availability(dates, mealtype, timeslots):
     payload = {
         "restaurant": "SG_SG_R_BurntEnds",
-        "dates": target_dates,
+        "dates": dates,
         "mealtype": mealtype,
         "product": "RestaurantMainDining",
         "timeslots": timeslots,
@@ -52,12 +54,12 @@ def check_availability(mealtype, timeslots):
     raw_slots = data.get("data", [])
 
     # Filter to only available slots (first field = "1")
-    # NOTE: Same 70% confidence caveat as Ovenbird
+    # NOTE: 70% confidence on this interpretation — to be verified against a live slot
     available = [s for s in raw_slots if s.split("|")[0] == "1"]
     return available
 
 def parse_slots(raw_slots):
-    # Group available slots by date
+    # Group available slots by date and party size
     by_date = {}
     for slot in raw_slots:
         parts = slot.split("|")
@@ -75,32 +77,39 @@ def main():
         exit(1)
 
     now = datetime.now(timezone.utc).strftime('%H:%M UTC')
+    fridays, saturdays = get_target_dates()
     print(f"Burnt Ends bot running at {now}")
-
-    send_telegram(f"Burnt Ends bot is running!\nChecking all dates for rest of 2026.")
+    print(f"Watching {len(fridays)} Fridays (dinner) and {len(saturdays)} Saturdays (lunch + dinner)")
 
     found_any = False
 
-    for mealtype, timeslots in [("lunch", TIMESLOTS_LUNCH), ("dinner", TIMESLOTS_DINNER)]:
+    # Friday — dinner only
+    checks = [
+        (fridays, "dinner", TIMESLOTS_DINNER, "Friday"),
+        (saturdays, "lunch", TIMESLOTS_LUNCH, "Saturday"),
+        (saturdays, "dinner", TIMESLOTS_DINNER, "Saturday"),
+    ]
+
+    for dates, mealtype, timeslots, day_label in checks:
         try:
-            print(f"  Checking {mealtype}...")
-            raw_slots = check_availability(mealtype, timeslots)
+            print(f"  Checking {day_label} {mealtype}...")
+            raw_slots = check_availability(dates, mealtype, timeslots)
 
             if raw_slots:
                 by_date = parse_slots(raw_slots)
                 for slot_date, sizes in sorted(by_date.items()):
                     send_telegram(
                         f"BURNT ENDS - SLOTS OPEN!\n"
-                        f"Date: {slot_date}\n"
+                        f"Date: {slot_date} ({day_label})\n"
                         f"Meal: {mealtype.capitalize()}\n"
                         f"Available for: {', '.join(sorted(sizes))}\n"
                         f"Book NOW: {BOOK_URL}"
                     )
-                    print(f"  Alert sent for {slot_date} {mealtype}!")
+                    print(f"  Alert sent for {slot_date} {day_label} {mealtype}!")
                     found_any = True
 
         except Exception as e:
-            print(f"  Error checking {mealtype}: {e}")
+            print(f"  Error checking {day_label} {mealtype}: {e}")
 
     if not found_any:
         print("No available slots found.")
